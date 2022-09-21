@@ -1,0 +1,251 @@
+---
+title: "White Wine Quality Prediction"
+author: "Varun Kausika"
+date: "2022-07-21"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Loading the data
+
+```{r, warning=FALSE}
+datawq = read.csv('winequality-white.csv', header=TRUE)
+
+attach(datawq)
+library(Boruta)
+library(tree)
+library(gbm) #boost package
+library(randomForest) 
+library(MASS)
+library(readr)
+library(kknn)
+library(tidyverse)
+```
+# Finding Variable Importance
+```{r}
+hist(datawq$quality)
+
+boruta_output = Boruta(quality~., data=na.omit(datawq), doTrace=2)  
+boruta_signif = names(boruta_output$finalDecision[boruta_output$finalDecision %in% c("Confirmed", "Tentative")])  # collect Confirmed and Tentative variables
+print(boruta_signif)
+plot(boruta_output, cex.axis=.7, las=2, xlab="", main="Variable Importance")
+```
+3 most important variables as per Boruta: volatile.acidity, alcohol, free.sulfur.dioxide
+
+# Implementing knn
+
+
+```{r}
+set.seed(1)
+# Random sampling
+#KNN
+samplesize = 0.50 * nrow(datawq)
+index = sample( seq_len ( nrow ( datawq ) ), size = samplesize )
+
+# Create training and test set
+train = datawq[ index, ]
+test = datawq[ -index, ]
+
+ind = order(test[,1])
+test =test[ind,]
+
+MSE = NULL
+
+kk = c(2,10,50,100,150,200,250,300,400,505)
+
+for(i in kk){
+  
+  near = kknn(quality~.,train,test,k=i,kernel = "rectangular")
+  aux = mean((test[,2]-near$fitted)^2)
+  
+  MSE = c(MSE,aux)
+  
+  cat ("Press [enter] to continue")
+  line <- readline()
+}
+
+
+plot(log(1/kk),sqrt(MSE),type="b",xlab="Complexity (log(1/k))",col="blue",ylab="RMSE",lwd=2,cex.lab=1.2)
+text(log(1/kk[1]),sqrt(MSE[1])+0.3,paste("k=",kk[1]),col=2,cex=1.2)
+text(log(1/kk[10])+0.4,sqrt(MSE[10]),paste("k=",kk[10]),col=2,cex=1.2)
+text(log(1/kk[5])+0.4,sqrt(MSE[5]),paste("k=",kk[5]),col=2,cex=1.2)
+
+
+set.seed(1)
+```
+k = 150 neighbours seems to give a decent RMSE
+
+# Implementing a Regression Tree
+
+## Sampling training set
+```{r}
+train = sample(1:nrow(datawq),nrow(datawq)/2)
+```
+
+## Fitting model to training set
+```{r}
+tree.winequality = tree(quality~.,data=datawq,subset=train)
+summary(tree.winequality)
+plot(tree.winequality)
+text(tree.winequality,pretty=0)
+```
+
+## Fitting to test set, calculating RMSE
+```{r}
+#The training model is now implemented on test data and RMSE is calculated:
+yhat = predict(tree.winequality,newdata=datawq[-train,])
+datawq.test = datawq[-train,"quality"]
+sqrt(mean((yhat-datawq.test)^2))
+```
+
+## Plotting line
+```{r}
+plot(yhat,datawq.test)
+abline(0,1)
+```
+
+Line can predict above 10 and below 0; this is not ideal.
+
+
+# Implementing a Classification Tree using rpart
+
+## Training model
+```{r}
+library(rpart) # For decision tree
+library(rpart.plot)
+
+set.seed(1)
+# Training model on training dataset
+model = rpart(quality~., data=datawq, subset = train, method='class')
+rpart.plot(model)
+```
+
+## Predicting on test dataset
+```{r}
+
+predict_test = predict(model, data=datawq[-train,], type = "class")
+predict_test %>% head()
+```
+
+## Error rate
+```{r}
+# Error rate 
+printcp(model)
+```
+
+
+## Creating confusion matrix
+```{r}
+# Creating confusion matrix
+confusion_matrix = table(datawq[-train,]$quality, predict_test)
+confusion_matrix
+```
+Classification tree does poorly when predicting 5's, anything above 6 :/
+Too many misclassifications, maybe we should stick to regression.
+
+# Random Forests
+
+## Training data
+```{r}
+#Trying randomForest on training data to see if error reduces further:
+rf.winequality = randomForest(quality~.,data=datawq,susbet=train,mtry=4,importance=T)
+rf.winequality
+plot(rf.winequality)
+summary(rf.winequality)
+```
+## Applying RF to test data
+```{r}
+#Applying random forest on test data:
+yhat.rf = predict(rf.winequality,datawq[-train,])
+plot(yhat.rf,datawq.test)
+abline(0,1)
+sqrt(mean((yhat.rf-datawq.test)^2))
+```
+Great improvement compared to Decision trees! RMSE reduces a lot.
+
+## Variable importance plots
+```{r}
+importance(rf.winequality)
+varImpPlot(rf.winequality)
+```
+Similar trends to what we were getting with Boruta.
+
+# Bagging
+```{r}
+#Bagging implemented on training data set to see the change in results:
+bag.winequality = randomForest(quality~.,data=datawq,subset=train,mtry=11,importance=T)
+bag.winequality
+summary(bag.winequality)
+plot(bag.winequality)
+```
+Finding: RMSE reduces considerably after applying bagging compared to the regression tree tried before.
+
+## Variable Importances
+```{r}
+importance(bag.winequality)
+```
+## Using bagging approach on test data:
+```{r}
+yhat.bag = predict(bag.winequality,datawq[-train,])
+plot(yhat.bag,datawq.test)
+abline(0,1)
+sqrt(mean((yhat.bag-datawq.test)^2))
+```
+RF is still the best in error rate.
+
+# Boosting
+
+## Fitting to training data
+```{r}
+#Implementing boosting on training data:
+boost.winequality = gbm(quality~.,data=datawq[train,],distribution="gaussian",n.trees=1000,interaction.depth=2,shrinkage=0.1)
+summary(boost.winequality)
+```
+
+## Fitting to test data
+```{r}
+#Applying boosting on test data:
+yhat.boost = predict(boost.winequality,newdata=datawq[-train,],ntrees=1000,interaction.depth=2,shrinkage=0.1)
+sqrt(mean((yhat.boost-datawq.test)^2))
+```
+
+RMSE = 0.69, meh
+
+## Changing boosting parameters
+```{r}
+#Changing boosting parameters
+boost.winequality2 = gbm(quality~.,data=datawq[train,],distribution="gaussian",n.trees=5000,interaction.depth=2,shrinkage=0.02)
+yhat.boost = predict(boost.winequality2,newdata=datawq[-train,],ntrees=5000,interaction.depth=2,shrinkage=0.02)
+sqrt(mean((yhat.boost-datawq.test)^2))
+```
+
+RMSE = 0.68
+Test MSE is still the best for random forest algorithm so far
+
+## XGBoost
+```{r, warning=FALSE, message=FALSE, results='hide'}
+library(xgboost)
+training.x = model.matrix(quality~., data = datawq[train,])
+testing.x = model.matrix(quality~., data = datawq[-train,])
+
+model.XGB = xgboost(data = data.matrix(training.x[,-1]),
+                    label = datawq[train,]$quality,
+                    eta = 0.1,
+                    max_depth =20,
+                    nrounds = 50,
+                    objective = 'reg:linear')
+
+# Train RMSE = 0.078
+
+# Obtaining test error
+y_pred = predict(model.XGB, data.matrix(testing.x[,-1]))
+RMSE = mean((y_pred - datawq.test)^2)
+print(RMSE)
+# Test RMSE = 0.45
+```
+Test RMSE = 0.45. Whoa! auto optimization of parameters by XGBoost has reduced error considerably.
+
+
